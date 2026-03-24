@@ -1,0 +1,23 @@
+# Build
+build/
+*.o
+*.a
+*.so
+*.dylib
+
+# Executables
+bin/
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
