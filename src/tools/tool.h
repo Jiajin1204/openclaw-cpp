@@ -5,7 +5,7 @@
 #include <functional>
 #include <map>
 
-#include "../openclaw/types.h"
+#include "openclaw/types.h"
 
 namespace openclaw {
 

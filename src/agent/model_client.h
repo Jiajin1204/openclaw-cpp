@@ -7,10 +7,13 @@
 #include <memory>
 #include <map>
 
-#include "../openclaw/message.h"
-#include "../openclaw/types.h"
+#include "openclaw/message.h"
+#include "openclaw/types.h"
 
 namespace openclaw {
+
+// 结果类型简写
+using ResultVoid = Result<bool>;
 
 // ============ Model Client ============
 

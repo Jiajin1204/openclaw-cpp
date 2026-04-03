@@ -3,6 +3,7 @@
 #include "../utils/config.h"
 #include <sstream>
 #include <curl/curl.h>
+#include <thread>
 
 // CURL 回调
 static size_t write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
@@ -199,7 +200,7 @@ ResultVoid ModelClient::chat_stream(
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     
-    return ResultVoid::success();
+    return ResultVoid::success(true);
 }
 
 } // namespace openclaw

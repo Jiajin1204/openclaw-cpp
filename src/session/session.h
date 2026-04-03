@@ -5,7 +5,7 @@
 #include <vector>
 #include <ctime>
 #include <optional>
-#include "message.h"
+#include "openclaw/message.h"
 
 namespace openclaw {
 
