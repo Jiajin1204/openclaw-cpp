@@ -6,13 +6,43 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <nlohmann/json.hpp>
 
 namespace openclaw {
 
-// ============ 简单 JSON 类型 ============
-// 使用 std::string 存储 JSON 字符串，避免复杂的模板依赖
+// ============ JSON 类型 ============
+using Json = nlohmann::json;
 
-using Json = std::string;
+// ============ 配置结构体 ============
+struct GatewayConfig {
+    std::string host;
+    int port = 0;
+    std::string token;
+};
+
+struct ModelConfig {
+    std::string provider;
+    std::string api_key;
+    std::string base_url;
+    std::string model;
+};
+
+struct WorkspaceConfig {
+    std::string path;
+};
+
+struct SessionConfig {
+    std::string dm_scope;
+    int max_entries = 20;
+    int prune_after_days = 30;
+};
+
+struct Config {
+    GatewayConfig gateway;
+    ModelConfig model;
+    WorkspaceConfig workspace;
+    SessionConfig session;
+};
 
 // ============ 结果类型 ============
 

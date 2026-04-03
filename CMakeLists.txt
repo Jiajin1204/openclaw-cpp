@@ -10,11 +10,14 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 find_package(Threads REQUIRED)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}
-                   ${CMAKE_CURRENT_SOURCE_DIR}/include)
+                   ${CMAKE_CURRENT_SOURCE_DIR}/include
+                   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json/include)
 
 set(SOURCES
     src/main.cpp
     src/client/unix_socket_client.cpp
+    src/utils/config.cpp
+    src/utils/logger.cpp
 )
 
 add_executable(openclaw-cpp ${SOURCES})
