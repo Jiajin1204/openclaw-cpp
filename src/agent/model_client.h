@@ -9,6 +9,8 @@
 
 #include "openclaw/message.h"
 #include "openclaw/types.h"
+#include "tools/tool_engine.h"
+#include "tools/tool_engine.h"
 
 namespace openclaw {
 
@@ -26,6 +28,7 @@ public:
     void set_api_key(const std::string& key);
     void set_base_url(const std::string& url);
     void set_model(const std::string& model);
+    void set_tool_engine(ToolEngine* engine) { tool_engine_ = engine; }
     
     // 聊天（非流式）
     struct ChatResponse {
@@ -50,6 +53,7 @@ private:
     std::string api_key_;
     std::string base_url_;
     std::string model_;
+    ToolEngine* tool_engine_;
     
     // HTTP 请求
     Result<std::string> http_post(

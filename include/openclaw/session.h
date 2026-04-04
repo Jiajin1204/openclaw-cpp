@@ -13,6 +13,9 @@ namespace openclaw {
 
 struct Session {
     std::string session_key;      // e.g., "agent:main:main"
+    
+    Session() = default;
+    Session(const std::string& key) : session_key(key) {}
     std::string agent_id;         // e.g., "main"
     
     std::vector<Message> history;

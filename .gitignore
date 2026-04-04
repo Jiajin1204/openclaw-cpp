@@ -5,9 +5,12 @@ build/
 *.so
 *.dylib
 
-# Executables
+# Executable
 bin/
-*.exe
+openclaw-cpp
+
+# Config with secrets (use config.json.example)
+config.json
 
 # IDE
 .vscode/
@@ -19,6 +22,9 @@ bin/
 .DS_Store
 Thumbs.db
 
+# Environment
+.env
+*.env
+
 # Logs
-*.log
-third_party/
+*.logthird_party/

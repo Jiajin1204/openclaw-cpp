@@ -48,6 +48,11 @@ private:
     
     // 内置工具
     void register_builtin_tools();
+    
+    // 工具实现
+    static Result<std::string> exec_tool(const std::string& params);
+    static Result<std::string> read_tool(const std::string& params);
+    static Result<std::string> write_tool(const std::string& params);
 };
 
 } // namespace openclaw

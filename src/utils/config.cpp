@@ -66,7 +66,10 @@ bool ConfigManager::parse_json(const nlohmann::json& j) {
         // workspace
         if (j.contains("workspace")) {
             const auto& w = j["workspace"];
-            if (w.contains("path")) config_.workspace.path = w["path"].get<std::string>();
+            if (w.contains("path")) {
+                config_.workspace.path = w["path"].get<std::string>();
+                config_.workspace.path = expand_env(config_.workspace.path);
+            }
         }
         
         // session
@@ -182,6 +185,9 @@ std::string ConfigManager::expand_env(const std::string& value) const {
         
         if (env_val) {
             result.replace(start, end - start + 1, env_val);
+        } else {
+            // 环境变量不存在，删除占位符
+            result.replace(start, end - start + 1, "");
         }
         
         start = end + 1;

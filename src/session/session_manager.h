@@ -24,33 +24,33 @@ public:
     Session* get_session(const std::string& key);
     
     // 保存会话
-    void save_session(const std::string& key);
+    bool save_session(const std::string& key);
     
     // 删除会话
-    void delete_session(const std::string& key);
+    bool delete_session(const std::string& key);
     
     // 列出会话
-    std::vector<std::string> list_sessions() const;
+    std::vector<std::string> list_sessions();
     
     // 会话数量
-    size_t count() const;
+    size_t count() const { return sessions_.size(); }
     
     // 清理过期会话
-    void cleanup(int max_age_days = 30);
+    void prune_old_sessions(int days = 30);
     
     // 获取会话目录
     std::string get_sessions_dir() const;
     void set_sessions_dir(const std::string& dir);
     
 private:
-    std::map<std::string, std::shared_ptr<Session>> sessions_;
+    std::map<std::string, std::unique_ptr<Session>> sessions_;
     mutable std::mutex mutex_;
     
     std::string sessions_dir_;
     
     // 持久化
-    void load_session_from_disk(const std::string& key);
-    void save_session_to_disk(const Session& session);
+    std::unique_ptr<Session> load_session_from_disk(const std::string& key);
+    bool save_session_to_disk(const Session& session);
 };
 
 } // namespace openclaw

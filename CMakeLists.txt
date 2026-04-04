@@ -7,18 +7,29 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 find_package(Threads REQUIRED)
+find_package(CURL QUIET)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}
                    ${CMAKE_CURRENT_SOURCE_DIR}/include
                    ${CMAKE_CURRENT_SOURCE_DIR}/src
                    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann_json/include)
 
-# 只编译 main 和基础文件
-set(SOURCES
-    src/main.cpp
-    src/utils/logger.cpp
-    src/utils/config.cpp
+# 收集所有源文件（排除 tools.cpp.bak）
+file(GLOB_RECURSE SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/*/*.cpp
 )
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/tools/tools.cpp.bak")
 
 add_executable(openclaw-cpp ${SOURCES})
-target_link_libraries(openclaw-cpp Threads::Threads)
+
+if(CURL_FOUND)
+    target_link_libraries(openclaw-cpp Threads::Threads CURL::libcurl)
+else()
+    target_link_libraries(openclaw-cpp Threads::Threads)
+endif()
+
+find_package(OpenSSL QUIET)
+if(OPENSSL_FOUND)
+    target_link_libraries(openclaw-cpp OpenSSL::SSL OpenSSL::Crypto)
+endif()
