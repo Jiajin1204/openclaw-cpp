@@ -1,157 +1,57 @@
-# openclaw-cpp 开发日记
+# 开发日志
 
-## 项目背景
+## 2026-04-04
 
-### 发起人
-- **罗同学** - SOC 厂商底层开发
-- 使用旧笔记本（华硕 X555LJ）运行 Ubuntu
+### 项目：openclaw-cpp
 
-### 需求
-用纯 C++ 实现精简版 OpenClaw Gateway，可在旧笔记本上运行。
+一个轻量级的 C++ 版 AI 助手，简化自 OpenClaw 原版。
 
-### 技术方案
-- **语言**: C++17
-- **HTTP**: libcurl
-- **JSON**: nlohmann/json（单头文件）
-- **编译**: CMake
+### 当前状态
 
-### 当前状态（2026-04-03）
-- ✅ 项目初始化完成
-- ✅ nlohmann/json 集成
-- ✅ 简化版 REPL（可编译运行）
-- ⚠️ Agent/ModelClient/Session 等模块代码存在但编译不完整
+**已完成：**
+- ✅ REPL 交互模式
+- ✅ 工具系统（exec, read, write）
+- ✅ 模型接入（MiniMax 等 OpenAI 兼容 API）
+- ✅ 会话管理（自动保存对话历史）
+- ✅ 环境变量配置支持
+- ✅ 模型验证（实际调用 API 测试）
+- ✅ 自定义 tool_calls 格式解析（MiniMax 模型的 `[TOOL_CALL]` 格式）
 
----
+**待完善：**
+- 第二次模型调用（让模型生成更自然的回复）
+- 流式输出支持
+- 插件/Channel 机制
 
-## 调试环境
+### 调试方法
 
-### 本机
-- **CPU**: Intel i3-4005U (双核 1.7GHz)
-- **内存**: 4GB
-- **系统**: Ubuntu 24.04 (Linux 6.8.0-106-generic)
-- **工作目录**: `~/.openclaw/workspace/openclaw-cpp`
+1. 编译：`cd build && cmake .. && make -j4`
+2. 运行：`export OPENCLAW_CPP_API_KEY="your-key" && ./bin/openclaw-cpp`
+3. 测试工具：`echo "ls /" | ./bin/openclaw-cpp`
 
-### 编译命令
-```bash
-cd ~/.openclaw/workspace/openclaw-cpp
-mkdir -p build && cd build
-cmake .. && make -j4
-./bin/openclaw-cpp
-```
+### 关键路径
 
-### 常用命令
-```bash
-# 清理编译
-rm -rf build && mkdir build
+- 源码：`~/.openclaw/workspace/openclaw-cpp/src/`
+- 可执行文件：`~/.openclaw/workspace/openclaw-cpp/build/bin/openclaw-cpp`
+- 配置文件：`~/.openclaw/workspace/openclaw-cpp/build/bin/config.json`
+- 会话目录：`~/.openclaw-cpp/sessions/`
 
-# 重新配置
-cmake .. -DCMAKE_BUILD_TYPE=Debug
-```
+### 问题解决
 
----
+1. **工具调用崩溃**：nlohmann/json 在处理某些参数格式时触发 `basic_string::_M_create` 错误  
+   解决：简化 parameters 为空对象 `{}`
 
-## 问题解决
+2. **模型不返回 tool_calls**：MiniMax 模型把工具调用放在 content 中而非标准的 JSON 字段  
+   解决：解析 `[TOOL_CALL]...[/TOOL_CALL]` 自定义格式
 
-### 问题 1：JSON 解析复杂
-**时间**: 2026-04-03 15:35
+3. **路径硬编码**：原来使用 `/home/jason/...`  
+   解决：改为可执行文件同目录查找配置
 
-**问题**: config.cpp 手写 JSON 解析代码复杂难维护
+### 教训总结
 
-**解决**: 
-- 集成 nlohmann/json（从 GitHub clone v3.11.3）
-- 重写 config.cpp 使用 nlohmann/json
-- 删除旧的自定义 Json 类型
-
-**经验**: 有成熟的库就用，别重复造轮子
+1. 不同模型的 tool_calls 格式可能不同，需要兼容多种格式
+2. nlohmann/json 在构造复杂对象时可能触发异常，需要 try-catch 保护
+3. API Key 不应提交到 Git，使用环境变量
 
 ---
 
-### 问题 2：编译失败（缺少头文件）
-**时间**: 2026-04-03 17:08
-
-**问题**: fe18d70 版本的 main.cpp 引用了很多不存在的头文件
-
-**原因**: 
-- `session/session.h` 不存在（只有 include/openclaw/session.h）
-- `tools/tools.h` 不存在
-- `agent/agent.h` 不存在
-
-**解决**:
-- 复制 include/openclaw/*.h 到 src/
-- 创建空的 tools/tools.h、agent/agent.h
-- 多次迭代修复 include 路径
-
----
-
-### 问题 3：接口不匹配
-**时间**: 2026-04-03 17:29
-
-**问题**: agent.cpp 使用了 IModelClient、IToolEngine 接口，但代码里没有定义
-
-**原因**: 早期代码版本不一致
-
-**解决**:
-- 暂时跳过 agent.cpp，创建一个简化版的 main.cpp
-- 后续需要重写 Agent 模块
-
----
-
-### 问题 4：ResultVoid 未定义
-**时间**: 2026-04-03 17:51
-
-**问题**: model_client.h 用了 ResultVoid 但没定义
-
-**解决**: 在 model_client.h 添加 `using ResultVoid = Result<bool>;`
-
----
-
-## 编译状态（2026-04-03 18:34）
-
-```
-openclaw-cpp ✅ 可编译运行
-├── main.cpp ✅ REPL 入口（简化版）
-├── utils/ ✅
-│   ├── logger.cpp ✅
-│   ├── config.cpp ✅ (nlohmann/json)
-│   └── ...
-├── agent/ ⚠️ 代码存在但需修复
-│   ├── agent.cpp ❌ 编译失败
-│   ├── agent.h ✅
-│   ├── agent_loop.cpp ✅
-│   ├── agent_loop.h ✅
-│   ├── model_client.cpp ⚠️ 小问题已修复
-│   └── model_client.h ✅
-├── session/ ⚠️
-│   ├── session.h ✅
-│   └── session_manager.cpp ✅
-├── tools/ ⚠️
-│   ├── tool.h ✅
-│   ├── tool_engine.h ✅
-│   ├── tools.cpp ❌ 引用不存在的方法
-│   └── tools.h ✅
-└── gateway/ ✅ 代码存在但未集成
-```
-
----
-
-## 经验总结
-
-1. **不要重复造轮子**: nlohmann/json 比手写解析香
-2. **Git revert 很必要**: 经常 `git checkout HEAD~1 -- file` 回退
-3. **分步验证**: 每修一个小问题就编译一次
-4. **简化优先**: 先让项目跑起来，再加功能
-
----
-
-## 待完成
-
-- [ ] 修复 tools.cpp 编译问题
-- [ ] 集成 Session 模块
-- [ ] 集成 ToolEngine 模块
-- [ ] 集成 AgentLoop 模块
-- [ ] 添���实际的命令执行（exec tool）
-- [ ] 测试运行 `ls /home/jason`
-
----
-
-_2026-04-03 创建_
+_下次开发提示：实现第二次模型调用，使回复更自然_
