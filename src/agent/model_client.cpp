@@ -8,7 +8,9 @@
 #include <nlohmann/json.hpp>
 #include "../utils/config.h"
 #include <sstream>
+#ifdef USE_CURL
 #include <curl/curl.h>
+#endif
 #include <thread>
 
 namespace openclaw {
