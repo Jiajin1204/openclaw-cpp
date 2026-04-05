@@ -192,7 +192,7 @@ int main(int argc, char* argv[]) {
         
         if (input.empty()) continue;
         
-        // 运行 Agent
+        // 运行 Agent（非流式）
         std::string response = agent_loop.run(session_key, input);
         std::cout << "\n🤖 " << response << "\n\n";
     }

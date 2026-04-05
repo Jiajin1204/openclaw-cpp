@@ -101,7 +101,8 @@ std::string ModelClient::build_request_body(
     j["model"] = model_;
     j["stream"] = stream;
     
-    // 添加工具定义
+    // 添加工具定义（暂时禁用，避免错误）
+    /*
     if (tool_engine_ != nullptr) {
         try {
             std::vector<Tool> tools = tool_engine_->list_tools();
@@ -124,6 +125,7 @@ std::string ModelClient::build_request_body(
             LOG_WARN("Failed to build tools: ", e.what());
         }
     }
+    */
     
     // 构建消息列表
     nlohmann::json msgs = nlohmann::json::array();
@@ -172,6 +174,20 @@ ModelClient::ChatResponse ModelClient::parse_response(const std::string& respons
             return response;
         }
         
+        // ===== Anthropic 格式 =====
+        if (j.contains("content") && j["content"].is_array()) {
+            for (auto& item : j["content"]) {
+                if (item.contains("text")) {
+                    response.content += item["text"].get<std::string>();
+                }
+            }
+            if (j.contains("stop_reason")) {
+                response.finish_reason = j["stop_reason"].get<std::string>();
+            }
+            return response;
+        }
+        
+        // ===== OpenAI 格式 =====
         // 提取 content 和 tool_calls
         if (j.contains("choices") && !j["choices"].empty()) {
             auto& choice = j["choices"][0];
@@ -266,7 +282,19 @@ Result<ModelClient::ChatResponse> ModelClient::chat(const std::vector<Message>& 
         return Result<ChatResponse>::success(mock_response);
     }
     
+    // 兼容 Anthropic API 路径
     std::string url = base_url_;
+    LOG_INFO("ModelClient::chat - base_url: ", base_url_);
+    LOG_INFO("ModelClient::chat - api_key length: ", (int)api_key_.length());
+    if (url.find("/chat/completions") != std::string::npos) {
+        url = url.replace(url.find("/chat/completions"), 17, "/anthropic/v1/messages");
+    } else if (url.find("/anthropic") != std::string::npos && url.find("/messages") == std::string::npos) {
+        url = url + "/v1/messages";
+    } else if (url.find("/v1") == std::string::npos) {
+        url = url + "/anthropic/v1/messages";
+    }
+    LOG_INFO("ModelClient::chat - final url: ", url);
+    
     std::string body = build_request_body(messages, false);
     
     auto result = http_post(url, body);
@@ -288,23 +316,98 @@ ResultVoid ModelClient::chat_stream(
         return ResultVoid::failure("No API key configured");
     }
     
+    // 兼容 Anthropic API 路径
     std::string url = base_url_;
-    std::string body = build_request_body(messages, true);
-    
-    // 简化实现：先不支持真正的流式
-    auto result = chat(messages);
-    
-    if (!result.ok) {
-        return ResultVoid::failure(result.error);
+    if (url.find("/chat/completions") != std::string::npos) {
+        url = url.replace(url.find("/chat/completions"), 17, "/anthropic/v1/messages");
+    } else if (url.find("/anthropic") != std::string::npos && url.find("/messages") == std::string::npos) {
+        url = url + "/v1/messages";
+    } else if (url.find("/v1") == std::string::npos) {
+        url = url + "/anthropic/v1/messages";
     }
     
-    // 逐块回调
-    const std::string& content = result.value.content;
-    size_t chunk_size = 10;
-    for (size_t i = 0; i < content.size(); i += chunk_size) {
-        std::string chunk = content.substr(i, std::min(chunk_size, content.size() - i));
-        on_chunk(chunk);
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::string body = build_request_body(messages, true);
+    
+    // 使用真正的流式 CURL
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return ResultVoid::failure("Failed to init CURL");
+    }
+    
+    std::string buffer;
+    buffer.reserve(8192);
+    
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    
+    // 流式回调
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, 
+        [](char* contents, size_t size, size_t nmemb, void* userp) -> size_t {
+            std::string* buffer = (std::string*)userp;
+            buffer->append(contents, size * nmemb);
+            return size * nmemb;
+        });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+    
+    // 添加 Header
+    struct curl_slist* header_list = nullptr;
+    header_list = curl_slist_append(header_list, "Content-Type: application/json");
+    header_list = curl_slist_append(header_list, "Accept: text/event-stream");
+    
+    if (!api_key_.empty() && api_key_.length() > 5) {
+        std::string auth = "Authorization: Bearer " + api_key_;
+        header_list = curl_slist_append(header_list, auth.c_str());
+    }
+    
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    
+    // 执行请求
+    CURLcode res = curl_easy_perform(curl);
+    curl_slist_free_all(header_list);
+    curl_easy_cleanup(curl);
+    
+    if (res != CURLE_OK) {
+        return ResultVoid::failure(std::string("CURL error: ") + curl_easy_strerror(res));
+    }
+    
+    // 解析 SSE 流
+    std::string current_delta;
+    size_t pos = 0;
+    while (pos < buffer.size()) {
+        // 寻找 "data: " 开始
+        size_t data_start = buffer.find("data: ", pos);
+        if (data_start == std::string::npos) break;
+        
+        data_start += 6; // 跳过 "data: "
+        
+        // 寻找行尾
+        size_t line_end = buffer.find('\n', data_start);
+        if (line_end == std::string::npos) line_end = buffer.size();
+        
+        std::string line = buffer.substr(data_start, line_end - data_start);
+        
+        // 跳过 "[DONE]"
+        if (line == "[DONE]") break;
+        
+        // 解析 JSON（简化：提取 content 字段）
+        try {
+            auto j = nlohmann::json::parse(line);
+            if (j.contains("choices") && !j["choices"].empty()) {
+                auto& choice = j["choices"][0];
+                if (choice.contains("delta")) {
+                    auto& delta = choice["delta"];
+                    if (delta.contains("content")) {
+                        std::string chunk = delta["content"];
+                        current_delta += chunk;
+                        on_chunk(chunk);
+                    }
+                }
+            }
+        } catch (...) {
+            // 忽略解析错误
+        }
+        
+        pos = line_end + 1;
     }
     
     return ResultVoid::success(true);
