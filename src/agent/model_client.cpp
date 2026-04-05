@@ -1,3 +1,8 @@
+/**
+ * @file model_client.cpp
+ * @brief 通用 Model Client - 支持多种 API 格式
+ */
+
 #include "model_client.h"
 #include "../utils/logger.h"
 #include <nlohmann/json.hpp>
@@ -6,19 +11,352 @@
 #include <curl/curl.h>
 #include <thread>
 
-// CURL 回调
+namespace openclaw {
+
+// ============================================================================
+// CURL 辅助函数
+// ============================================================================
+
 static size_t write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
     ((std::string*)userp)->append((char*)contents, size * nmemb);
     return size * nmemb;
 }
 
-namespace openclaw {
+// ============================================================================
+// HTTP 客户端
+// ============================================================================
+
+struct HttpClient {
+    std::string api_key;
+    std::string base_url;
+    
+    HttpClient(const std::string& url = "", const std::string& key = "") 
+        : base_url(url), api_key(key) {}
+    
+    void set_url(const std::string& url) { base_url = url; }
+    void set_key(const std::string& key) { api_key = key; }
+    
+    // 通用 POST 请求
+    Result<std::string> post(const std::string& path, const std::string& body,
+                            const std::map<std::string, std::string>& extra_headers = {}) {
+        std::string url = base_url;
+        if (!path.empty() && path[0] != '/') url += "/";
+        url += path;
+        
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            return Result<std::string>::failure("Failed to init CURL");
+        }
+        
+        std::string response;
+        response.reserve(8192);
+        
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+        
+        struct curl_slist* header_list = nullptr;
+        header_list = curl_slist_append(header_list, "Content-Type: application/json");
+        
+        if (!api_key.empty()) {
+            std::string auth = "Authorization: Bearer " + api_key;
+            header_list = curl_slist_append(header_list, auth.c_str());
+        }
+        
+        for (const auto& [k, v] : extra_headers) {
+            std::string h = k + ": " + v;
+            header_list = curl_slist_append(header_list, h.c_str());
+        }
+        
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+        
+        CURLcode res = curl_easy_perform(curl);
+        curl_slist_free_all(header_list);
+        curl_easy_cleanup(curl);
+        
+        if (res != CURLE_OK) {
+            return Result<std::string>::failure(std::string("CURL error: ") + curl_easy_strerror(res));
+        }
+        
+        return Result<std::string>::success(response);
+    }
+    
+    // 流式 POST 请求
+    ResultVoid post_stream(const std::string& path, const std::string& body,
+                          StreamCallback on_chunk,
+                          const std::map<std::string, std::string>& extra_headers = {}) {
+        std::string url = base_url;
+        if (!path.empty() && path[0] != '/') url += "/";
+        url += path;
+        
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            return ResultVoid::failure("Failed to init CURL");
+        }
+        
+        std::string buffer;
+        buffer.reserve(8192);
+        
+        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        
+        // 流式回调：实时处理收到的数据
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, 
+            [](char* contents, size_t size, size_t nmemb, void* userp) -> size_t {
+                std::string* buf = (std::string*)userp;
+                buf->append(contents, size * nmemb);
+                return size * nmemb;
+            });
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+        
+        struct curl_slist* header_list = nullptr;
+        header_list = curl_slist_append(header_list, "Content-Type: application/json");
+        header_list = curl_slist_append(header_list, "Accept: text/event-stream");
+        
+        if (!api_key.empty()) {
+            std::string auth = "Authorization: Bearer " + api_key;
+            header_list = curl_slist_append(header_list, auth.c_str());
+        }
+        
+        for (const auto& [k, v] : extra_headers) {
+            std::string h = k + ": " + v;
+            header_list = curl_slist_append(header_list, h.c_str());
+        }
+        
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+        
+        CURLcode res = curl_easy_perform(curl);
+        curl_slist_free_all(header_list);
+        curl_easy_cleanup(curl);
+        
+        if (res != CURLE_OK) {
+            return ResultVoid::failure(std::string("CURL error: ") + curl_easy_strerror(res));
+        }
+        
+        // 解析 SSE 流
+        on_chunk(buffer);
+        
+        return ResultVoid::success(true);
+    }
+};
+
+// ============================================================================
+// API 适配器基类
+// ============================================================================
+
+struct ApiAdapter {
+    virtual ~ApiAdapter() = default;
+    
+    // 获取 API 路径（相对于 base_url）
+    virtual std::string get_path(bool stream) const = 0;
+    
+    // 构建请求体
+    virtual std::string build_body(const std::string& model, 
+                                    const std::vector<Message>& messages,
+                                    bool stream) const = 0;
+    
+    // 解析非流式响应
+    virtual ModelClient::ChatResponse parse_response(const std::string& body) const = 0;
+    
+    // 解析流式响应块
+    virtual std::vector<std::string> parse_stream_chunk(const std::string& line) const = 0;
+};
+
+// ============================================================================
+// OpenAI 格式适配器
+// ============================================================================
+
+struct OpenAiAdapter : ApiAdapter {
+    std::string get_path(bool stream) const override {
+        return "/v1/chat/completions";
+    }
+    
+    std::string build_body(const std::string& model,
+                          const std::vector<Message>& messages,
+                          bool stream) const override {
+        nlohmann::json j;
+        j["model"] = model;
+        j["stream"] = stream;
+        
+        nlohmann::json msgs = nlohmann::json::array();
+        for (const auto& m : messages) {
+            nlohmann::json msg;
+            msg["role"] = role_to_string(m.role);
+            if (!m.content.empty()) msg["content"] = m.content;
+            msgs.push_back(msg);
+        }
+        j["messages"] = msgs;
+        
+        return j.dump();
+    }
+    
+    ModelClient::ChatResponse parse_response(const std::string& body) const override {
+        ModelClient::ChatResponse response;
+        try {
+            auto j = nlohmann::json::parse(body);
+            
+            if (j.contains("error")) {
+                response.content = "Error: " + j["error"].dump();
+                return response;
+            }
+            
+            if (j.contains("choices") && !j["choices"].empty()) {
+                auto& choice = j["choices"][0];
+                if (choice.contains("message")) {
+                    auto& msg = choice["message"];
+                    if (msg.contains("content") && !msg["content"].is_null()) {
+                        response.content = msg["content"].get<std::string>();
+                    }
+                }
+                if (choice.contains("finish_reason")) {
+                    response.finish_reason = choice["finish_reason"].get<std::string>();
+                }
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("OpenAI parse error: ", e.what());
+            response.content = body;
+        }
+        return response;
+    }
+    
+    std::vector<std::string> parse_stream_chunk(const std::string& line) const override {
+        std::vector<std::string> chunks;
+        
+        // OpenAI SSE: "data: {...}\n\n"
+        size_t pos = 0;
+        while (pos < line.size()) {
+            size_t data_start = line.find("data:", pos);
+            if (data_start == std::string::npos) break;
+            
+            data_start += 5; // skip "data:"
+            while (data_start < line.size() && line[data_start] == ' ') data_start++;
+            
+            size_t line_end = line.find('\n', data_start);
+            if (line_end == std::string::npos) line_end = line.size();
+            
+            std::string json_str = line.substr(data_start, line_end - data_start);
+            if (json_str == "[DONE]") return chunks;
+            
+            try {
+                auto j = nlohmann::json::parse(json_str);
+                if (j.contains("choices") && !j["choices"].empty()) {
+                    auto& choice = j["choices"][0];
+                    if (choice.contains("delta") && choice["delta"].contains("content")) {
+                        chunks.push_back(choice["delta"]["content"].get<std::string>());
+                    }
+                }
+            } catch (...) {}
+            
+            pos = line_end + 1;
+        }
+        
+        return chunks;
+    }
+};
+
+// ============================================================================
+// Anthropic 格式适配器
+// ============================================================================
+
+struct AnthropicAdapter : ApiAdapter {
+    std::string get_path(bool stream) const override {
+        return "/v1/messages";
+    }
+    
+    std::string build_body(const std::string& model,
+                          const std::vector<Message>& messages,
+                          bool stream) const override {
+        nlohmann::json j;
+        j["model"] = model;
+        j["stream"] = stream;
+        
+        nlohmann::json msgs = nlohmann::json::array();
+        for (const auto& m : messages) {
+            nlohmann::json msg;
+            msg["role"] = role_to_string(m.role);
+            if (!m.content.empty()) msg["content"] = m.content;
+            msgs.push_back(msg);
+        }
+        j["messages"] = msgs;
+        
+        return j.dump();
+    }
+    
+    ModelClient::ChatResponse parse_response(const std::string& body) const override {
+        ModelClient::ChatResponse response;
+        try {
+            auto j = nlohmann::json::parse(body);
+            
+            if (j.contains("type") && j["type"] == "error") {
+                response.content = "Error: " + j.value("message", "unknown error");
+                return response;
+            }
+            
+            if (j.contains("content") && j["content"].is_array()) {
+                for (auto& item : j["content"]) {
+                    if (item.contains("text")) {
+                        response.content += item["text"].get<std::string>();
+                    }
+                }
+            }
+            
+            if (j.contains("stop_reason")) {
+                response.finish_reason = j["stop_reason"].get<std::string>();
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("Anthropic parse error: ", e.what());
+            response.content = body;
+        }
+        return response;
+    }
+    
+    std::vector<std::string> parse_stream_chunk(const std::string& line) const override {
+        std::vector<std::string> chunks;
+        
+        // Anthropic SSE: "data: {...}\n\n"
+        size_t pos = 0;
+        while (pos < line.size()) {
+            size_t data_start = line.find("data:", pos);
+            if (data_start == std::string::npos) break;
+            
+            data_start += 5;
+            while (data_start < line.size() && line[data_start] == ' ') data_start++;
+            
+            size_t line_end = line.find('\n', data_start);
+            if (line_end == std::string::npos) line_end = line.size();
+            
+            std::string json_str = line.substr(data_start, line_end - data_start);
+            if (json_str == "[DONE]") return chunks;
+            
+            try {
+                auto j = nlohmann::json::parse(json_str);
+                std::string type = j.value("type", "");
+                
+                if (type == "content_block_delta") {
+                    if (j.contains("delta") && j["delta"].contains("text")) {
+                        chunks.push_back(j["delta"]["text"].get<std::string>());
+                    }
+                }
+            } catch (...) {}
+            
+            pos = line_end + 1;
+        }
+        
+        return chunks;
+    }
+};
+
+// ============================================================================
+// Model Client
+// ============================================================================
 
 // 全局 CURL 初始化标记
-bool g_curl_initialized = false;
+static bool g_curl_initialized = false;
 
 ModelClient::ModelClient() {
-    // 初始化 CURL（只执行一次）
     if (!g_curl_initialized) {
         curl_global_init(CURL_GLOBAL_DEFAULT);
         g_curl_initialized = true;
@@ -28,252 +366,29 @@ ModelClient::ModelClient() {
     api_key_ = config.model.api_key;
     base_url_ = config.model.base_url;
     model_ = config.model.model;
+    
+    // 根据 base_url 自动选择适配器
+    if (base_url_.find("anthropic") != std::string::npos) {
+        adapter_ = std::make_unique<AnthropicAdapter>();
+    } else if (base_url_.find("openai") != std::string::npos ||
+               base_url_.find("dashscope") != std::string::npos ||
+               base_url_.find("aliyun") != std::string::npos) {
+        adapter_ = std::make_unique<OpenAiAdapter>();
+    } else {
+        // 默认 OpenAI 兼容
+        adapter_ = std::make_unique<OpenAiAdapter>();
+    }
 }
 
 ModelClient::~ModelClient() {
 }
 
-void ModelClient::set_api_key(const std::string& key) {
-    api_key_ = key;
-}
+void ModelClient::set_api_key(const std::string& key) { api_key_ = key; }
+void ModelClient::set_base_url(const std::string& url) { base_url_ = url; }
+void ModelClient::set_model(const std::string& model) { model_ = model; }
+void ModelClient::set_tool_engine(ToolEngine* engine) { tool_engine_ = engine; }
 
-void ModelClient::set_base_url(const std::string& url) {
-    base_url_ = url;
-}
-
-void ModelClient::set_model(const std::string& model) {
-    model_ = model;
-}
-
-// HTTP POST 请求
-Result<std::string> ModelClient::http_post(
-    const std::string& url,
-    const std::string& body,
-    const std::map<std::string, std::string>& headers
-) {
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        return Result<std::string>::failure("Failed to init CURL");
-    }
-    
-    std::string response;
-    response.reserve(8192);  // 预分配避免多次扩容
-    
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-    
-    struct curl_slist* header_list = nullptr;
-    header_list = curl_slist_append(header_list, "Content-Type: application/json");
-    
-    // 添加认证头
-    if (!api_key_.empty() && api_key_.length() > 5) {
-        std::string auth = "Authorization: Bearer " + api_key_;
-        header_list = curl_slist_append(header_list, auth.c_str());
-    }
-    
-    for (const auto& [key, value] : headers) {
-        std::string h = key + ": " + value;
-        header_list = curl_slist_append(header_list, h.c_str());
-    }
-    
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
-    
-    CURLcode res = curl_easy_perform(curl);
-    
-    curl_slist_free_all(header_list);
-    curl_easy_cleanup(curl);
-    
-    if (res != CURLE_OK) {
-        return Result<std::string>::failure(std::string("CURL error: ") + curl_easy_strerror(res));
-    }
-    
-    return Result<std::string>::success(response);
-}
-
-// 构建请求体
-std::string ModelClient::build_request_body(
-    const std::vector<Message>& messages,
-    bool stream
-) const {
-    nlohmann::json j;
-    j["model"] = model_;
-    j["stream"] = stream;
-    
-    // 添加工具定义（暂时禁用，避免错误）
-    /*
-    if (tool_engine_ != nullptr) {
-        try {
-            std::vector<Tool> tools = tool_engine_->list_tools();
-            if (!tools.empty()) {
-                nlohmann::json tarr = nlohmann::json::array();
-                for (const auto& t : tools) {
-                    nlohmann::json func;
-                    func["name"] = t.name;
-                    func["description"] = t.description;
-                    func["parameters"] = nlohmann::json::object();  // 简化参数
-                    
-                    nlohmann::json tool_def;
-                    tool_def["type"] = "function";
-                    tool_def["function"] = func;
-                    tarr.push_back(tool_def);
-                }
-                j["tools"] = tarr;
-            }
-        } catch (const std::exception& e) {
-            LOG_WARN("Failed to build tools: ", e.what());
-        }
-    }
-    */
-    
-    // 构建消息列表
-    nlohmann::json msgs = nlohmann::json::array();
-    for (const auto& m : messages) {
-        nlohmann::json msg;
-        msg["role"] = role_to_string(m.role);
-        
-        if (!m.content.empty()) {
-            msg["content"] = m.content;
-        }
-        
-        if (m.tool_call_id && !m.tool_call_id->empty()) {
-            msg["tool_call_id"] = *m.tool_call_id;
-        }
-        if (m.name && !m.name->empty()) {
-            msg["name"] = *m.name;
-        }
-        
-        msgs.push_back(msg);
-    }
-    j["messages"] = msgs;
-    
-    return j.dump();
-}
-
-// 解析响应
-ModelClient::ChatResponse ModelClient::parse_response(const std::string& response_body) const {
-    ChatResponse response;
-    
-    try {
-        auto j = nlohmann::json::parse(response_body);
-        
-        // 检查 API 错误响应
-        if (j.contains("base_resp") && j["base_resp"].contains("status_code")) {
-            int status_code = j["base_resp"]["status_code"];
-            if (status_code != 0) {
-                std::string error_msg = j["base_resp"].value("status_msg", "Unknown error");
-                response.content = "API Error: " + error_msg;
-                return response;
-            }
-        }
-        
-        // 检查 error 字段
-        if (j.contains("error")) {
-            response.content = "Error: " + j["error"].dump();
-            return response;
-        }
-        
-        // ===== Anthropic 格式 =====
-        if (j.contains("content") && j["content"].is_array()) {
-            for (auto& item : j["content"]) {
-                if (item.contains("text")) {
-                    response.content += item["text"].get<std::string>();
-                }
-            }
-            if (j.contains("stop_reason")) {
-                response.finish_reason = j["stop_reason"].get<std::string>();
-            }
-            return response;
-        }
-        
-        // ===== OpenAI 格式 =====
-        // 提取 content 和 tool_calls
-        if (j.contains("choices") && !j["choices"].empty()) {
-            auto& choice = j["choices"][0];
-            
-            if (choice.contains("message")) {
-                auto& msg = choice["message"];
-                
-                if (msg.contains("content") && !msg["content"].is_null()) {
-                    response.content = msg["content"];
-                }
-                
-                // 标准格式 tool_calls
-                if (msg.contains("tool_calls") && !msg["tool_calls"].empty()) {
-                    for (auto& tc : msg["tool_calls"]) {
-                        ToolCall call;
-                        if (tc.contains("id")) call.id = tc["id"];
-                        if (tc.contains("function")) {
-                            auto& func = tc["function"];
-                            if (func.contains("name")) call.name = func["name"];
-                            if (func.contains("arguments")) {
-                                if (func["arguments"].is_string()) {
-                                    call.arguments = func["arguments"];
-                                } else {
-                                    call.arguments = func["arguments"].dump();
-                                }
-                            }
-                        }
-                        response.tool_calls.push_back(call);
-                    }
-                }
-                
-                // 自定义格式：某些模型把 tool_calls 放在 content 中
-                if (response.tool_calls.empty() && !response.content.empty()) {
-                    std::string& content = response.content;
-                    size_t start = content.find("[TOOL_CALL]");
-                    if (start != std::string::npos) {
-                        size_t end = content.find("[/TOOL_CALL]", start);
-                        if (end != std::string::npos) {
-                            std::string tool_str = content.substr(start + 11, end - start - 11);
-                            
-                            // 解析 {tool => "xxx", args => {...}}
-                            size_t tool_pos = tool_str.find("tool => \"");
-                            if (tool_pos != std::string::npos) {
-                                ToolCall call;
-                                size_t name_start = tool_pos + 9;
-                                size_t name_end = tool_str.find("\"", name_start);
-                                if (name_end != std::string::npos && name_end > name_start) {
-                                    call.name = tool_str.substr(name_start, name_end - name_start);
-                                    call.id = "call_" + call.name + "_manual";
-                                }
-                                
-                                size_t args_start = tool_str.find("args => ", name_end);
-                                if (args_start != std::string::npos) {
-                                    args_start += 8;
-                                    call.arguments = tool_str.substr(args_start);
-                                }
-                                
-                                if (!call.name.empty()) {
-                                    response.tool_calls.push_back(call);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            if (choice.contains("finish_reason")) {
-                response.finish_reason = choice["finish_reason"];
-            }
-        }
-        
-        // 提取 usage
-        if (j.contains("usage")) {
-            auto& usage = j["usage"];
-            if (usage.contains("prompt_tokens")) response.input_tokens = usage["prompt_tokens"];
-            if (usage.contains("completion_tokens")) response.output_tokens = usage["completion_tokens"];
-        }
-    } catch (const std::exception& e) {
-        LOG_ERROR("Failed to parse response: ", e.what());
-        response.content = response_body;
-    }
-    
-    return response;
-}
-
-// 聊天（非流式）
+// 非流式聊天
 Result<ModelClient::ChatResponse> ModelClient::chat(const std::vector<Message>& messages) {
     if (api_key_.empty()) {
         ChatResponse mock_response;
@@ -282,32 +397,20 @@ Result<ModelClient::ChatResponse> ModelClient::chat(const std::vector<Message>& 
         return Result<ChatResponse>::success(mock_response);
     }
     
-    // 兼容 Anthropic API 路径
-    std::string url = base_url_;
-    LOG_INFO("ModelClient::chat - base_url: ", base_url_);
-    LOG_INFO("ModelClient::chat - api_key length: ", (int)api_key_.length());
-    if (url.find("/chat/completions") != std::string::npos) {
-        url = url.replace(url.find("/chat/completions"), 17, "/anthropic/v1/messages");
-    } else if (url.find("/anthropic") != std::string::npos && url.find("/messages") == std::string::npos) {
-        url = url + "/v1/messages";
-    } else if (url.find("/v1") == std::string::npos) {
-        url = url + "/anthropic/v1/messages";
-    }
-    LOG_INFO("ModelClient::chat - final url: ", url);
+    HttpClient client(base_url_, api_key_);
+    std::string path = adapter_->get_path(false);
+    std::string body = adapter_->build_body(model_, messages, false);
     
-    std::string body = build_request_body(messages, false);
-    
-    auto result = http_post(url, body);
-    
+    auto result = client.post(path, body);
     if (!result.ok) {
         return Result<ChatResponse>::failure(result.error);
     }
     
-    ChatResponse response = parse_response(result.value);
+    ChatResponse response = adapter_->parse_response(result.value);
     return Result<ChatResponse>::success(response);
 }
 
-// 聊天（流式）- 模拟实现：先获取完整响应，再逐块回调
+// 流式聊天 - 使用模拟流式（非流式获取 + 逐块输出）
 ResultVoid ModelClient::chat_stream(
     const std::vector<Message>& messages,
     StreamCallback on_chunk
@@ -316,42 +419,26 @@ ResultVoid ModelClient::chat_stream(
         return ResultVoid::failure("No API key configured");
     }
     
-    // 兼容 Anthropic API 路径
-    std::string url = base_url_;
-    if (url.find("/chat/completions") != std::string::npos) {
-        url = url.replace(url.find("/chat/completions"), 17, "/anthropic/v1/messages");
-    } else if (url.find("/anthropic") != std::string::npos && url.find("/messages") == std::string::npos) {
-        url = url + "/v1/messages";
-    } else if (url.find("/v1") == std::string::npos) {
-        url = url + "/anthropic/v1/messages";
+    // 使用非流式获取完整响应
+    auto non_stream = chat(messages);
+    if (!non_stream.ok) {
+        return ResultVoid::failure(non_stream.error);
     }
     
-    // 使用非流式请求获取完整响应
-    auto result = chat(messages);
-    
-    if (!result.ok) {
-        return ResultVoid::failure(result.error);
-    }
-    
-    // 模拟流式：按字符（而非字节）逐块回调，避免UTF-8中文乱码
-    const std::string& content = result.value.content;
-    const size_t chunk_size = 10;  // 每10个字符一块
+    // 模拟流式：UTF-8 友好分割，逐块输出
+    const std::string& content = non_stream.value.content;
+    const size_t chunk_size = 10;
     
     size_t i = 0;
     while (i < content.size()) {
-        // 计算这块的结束位置
         size_t end = std::min(i + chunk_size, content.size());
-        
-        // 如果结束位置不是字符边界（UTF-8中文字符3字节），往回找
+        // 确保不切断 UTF-8 字符
         while (end > i && (content[end] & 0xC0) == 0x80) {
             end--;
         }
-        
         if (end <= i) end = std::min(i + 1, content.size());
         
-        std::string chunk = content.substr(i, end - i);
-        on_chunk(chunk);
-        
+        on_chunk(content.substr(i, end - i));
         i = end;
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
