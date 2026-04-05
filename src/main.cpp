@@ -192,9 +192,14 @@ int main(int argc, char* argv[]) {
         
         if (input.empty()) continue;
         
-        // 运行 Agent（非流式）
-        std::string response = agent_loop.run(session_key, input);
-        std::cout << "\n🤖 " << response << "\n\n";
+        // 运行 Agent（流式输出）
+        std::cout << "\n🤖 ";
+        std::string response;
+        agent_loop.run_stream(session_key, input, [&response](const std::string& chunk) {
+            std::cout << chunk << std::flush;
+            response += chunk;
+        });
+        std::cout << "\n\n";
     }
     
     return 0;

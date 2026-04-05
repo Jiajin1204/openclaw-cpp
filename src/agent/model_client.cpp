@@ -307,7 +307,7 @@ Result<ModelClient::ChatResponse> ModelClient::chat(const std::vector<Message>& 
     return Result<ChatResponse>::success(response);
 }
 
-// 聊天（流式）
+// 聊天（流式）- 模拟实现：先获取完整响应，再逐块回调
 ResultVoid ModelClient::chat_stream(
     const std::vector<Message>& messages,
     StreamCallback on_chunk
@@ -326,88 +326,34 @@ ResultVoid ModelClient::chat_stream(
         url = url + "/anthropic/v1/messages";
     }
     
-    std::string body = build_request_body(messages, true);
+    // 使用非流式请求获取完整响应
+    auto result = chat(messages);
     
-    // 使用真正的流式 CURL
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        return ResultVoid::failure("Failed to init CURL");
+    if (!result.ok) {
+        return ResultVoid::failure(result.error);
     }
     
-    std::string buffer;
-    buffer.reserve(8192);
+    // 模拟流式：按字符（而非字节）逐块回调，避免UTF-8中文乱码
+    const std::string& content = result.value.content;
+    const size_t chunk_size = 10;  // 每10个字符一块
     
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
-    
-    // 流式回调
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, 
-        [](char* contents, size_t size, size_t nmemb, void* userp) -> size_t {
-            std::string* buffer = (std::string*)userp;
-            buffer->append(contents, size * nmemb);
-            return size * nmemb;
-        });
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
-    
-    // 添加 Header
-    struct curl_slist* header_list = nullptr;
-    header_list = curl_slist_append(header_list, "Content-Type: application/json");
-    header_list = curl_slist_append(header_list, "Accept: text/event-stream");
-    
-    if (!api_key_.empty() && api_key_.length() > 5) {
-        std::string auth = "Authorization: Bearer " + api_key_;
-        header_list = curl_slist_append(header_list, auth.c_str());
-    }
-    
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
-    
-    // 执行请求
-    CURLcode res = curl_easy_perform(curl);
-    curl_slist_free_all(header_list);
-    curl_easy_cleanup(curl);
-    
-    if (res != CURLE_OK) {
-        return ResultVoid::failure(std::string("CURL error: ") + curl_easy_strerror(res));
-    }
-    
-    // 解析 SSE 流
-    std::string current_delta;
-    size_t pos = 0;
-    while (pos < buffer.size()) {
-        // 寻找 "data: " 开始
-        size_t data_start = buffer.find("data: ", pos);
-        if (data_start == std::string::npos) break;
+    size_t i = 0;
+    while (i < content.size()) {
+        // 计算这块的结束位置
+        size_t end = std::min(i + chunk_size, content.size());
         
-        data_start += 6; // 跳过 "data: "
-        
-        // 寻找行尾
-        size_t line_end = buffer.find('\n', data_start);
-        if (line_end == std::string::npos) line_end = buffer.size();
-        
-        std::string line = buffer.substr(data_start, line_end - data_start);
-        
-        // 跳过 "[DONE]"
-        if (line == "[DONE]") break;
-        
-        // 解析 JSON（简化：提取 content 字段）
-        try {
-            auto j = nlohmann::json::parse(line);
-            if (j.contains("choices") && !j["choices"].empty()) {
-                auto& choice = j["choices"][0];
-                if (choice.contains("delta")) {
-                    auto& delta = choice["delta"];
-                    if (delta.contains("content")) {
-                        std::string chunk = delta["content"];
-                        current_delta += chunk;
-                        on_chunk(chunk);
-                    }
-                }
-            }
-        } catch (...) {
-            // 忽略解析错误
+        // 如果结束位置不是字符边界（UTF-8中文字符3字节），往回找
+        while (end > i && (content[end] & 0xC0) == 0x80) {
+            end--;
         }
         
-        pos = line_end + 1;
+        if (end <= i) end = std::min(i + 1, content.size());
+        
+        std::string chunk = content.substr(i, end - i);
+        on_chunk(chunk);
+        
+        i = end;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     
     return ResultVoid::success(true);
