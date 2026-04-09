@@ -7,6 +7,7 @@
 #include <openssl/bio.h>
 #include <openssl/evp.h>
 #include <openssl/buffer.h>
+#include <cstring>
 
 // Base64 编解码
 static std::string base64_encode(const unsigned char* input, int length) {

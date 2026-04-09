@@ -1,23 +1,7 @@
-# Build
+third_party/
 build/
 *.o
 *.a
-*.so
-*.dylib
-
-# Executables
-bin/
-*.exe
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
+openclaw-cpp
+config.json
+.session

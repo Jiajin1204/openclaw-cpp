@@ -10,8 +10,8 @@ AgentLoop::AgentLoop(SessionManager* session_manager, ToolEngine* tool_engine)
     , tool_engine_(tool_engine)
 {
     model_client_ = std::make_unique<ModelClient>();
+    model_client_->set_tool_engine(tool_engine_);
     
-    // 默认系统提示词
     system_prompt_ = R"(You are OpenClaw C++, an AI assistant. You can help users with various tasks.
     
 You have access to tools:
@@ -33,32 +33,29 @@ void AgentLoop::set_model_client(std::unique_ptr<ModelClient> client) {
     model_client_ = std::move(client);
 }
 
+// 构建消息列表
 std::vector<Message> AgentLoop::build_messages(
     const std::string& session_key,
     const std::string& user_message
 ) {
     std::vector<Message> messages;
-    
-    // 添加系统消息
     messages.push_back(Message(MessageRole::System, system_prompt_));
     
-    // 添加历史消息
     if (session_manager_) {
         Session* session = session_manager_->get_session(session_key);
         if (session) {
-            auto context = session->get_context(10);  // 最近 10 条
+            auto context = session->get_context(10);
             for (const auto& msg : context) {
                 messages.push_back(msg);
             }
         }
     }
     
-    // 添加用户新消息
     messages.push_back(Message(MessageRole::User, user_message));
-    
     return messages;
 }
 
+// 处理工具调用
 std::vector<ToolResult> AgentLoop::process_tool_calls(
     const std::vector<ToolCall>& tool_calls
 ) {
@@ -69,9 +66,6 @@ std::vector<ToolResult> AgentLoop::process_tool_calls(
     }
     
     for (const auto& tc : tool_calls) {
-        LOG_INFO("Executing tool: ", tc.name);
-        
-        // 执行工具
         auto result = tool_engine_->execute(tc.name, tc.arguments);
         
         ToolResult tr;
@@ -84,20 +78,17 @@ std::vector<ToolResult> AgentLoop::process_tool_calls(
         }
         
         results.push_back(tr);
-        
-        LOG_INFO("Tool result: ", tr.content.substr(0, 100));
     }
     
     return results;
 }
 
+// 运行 Agent（单次对话）
 std::string AgentLoop::run(const std::string& session_key, const std::string& user_message) {
-    LOG_INFO("Agent run for session: ", session_key);
-    
-    // 1. 构建消息
+    // 构建消息
     std::vector<Message> messages = build_messages(session_key, user_message);
     
-    // 添加用户消息到会话
+    // 保存用户消息
     if (session_manager_) {
         Session* session = session_manager_->get_session(session_key);
         if (session) {
@@ -105,20 +96,27 @@ std::string AgentLoop::run(const std::string& session_key, const std::string& us
         }
     }
     
-    // 2. 调用模型
+    // 调用模型
     auto result = model_client_->chat(messages);
     
     if (!result.ok) {
-        LOG_ERROR("Model call failed: ", result.error);
         return "Sorry, I encountered an error: " + result.error;
     }
     
     std::string response = result.value.content;
+    std::vector<ToolCall> tool_calls = result.value.tool_calls;
     
-    // 3. 处理工具调用（简化版：目前不支持）
-    // 实际实现需要解析 result.value.tool_calls
+    // 处理工具调用
+    if (!tool_calls.empty()) {
+        auto tool_results = process_tool_calls(tool_calls);
+        
+        // 直接返回工具执行结果
+        response = "工具执行完成。结果：\n" + tool_results[0].content;
+        
+        // TODO: 实现第二次模型调用，让模型生成更自然的回复
+    }
     
-    // 4. 添加响应到会话
+    // 保存助手回复
     if (session_manager_) {
         Session* session = session_manager_->get_session(session_key);
         if (session) {
@@ -127,19 +125,17 @@ std::string AgentLoop::run(const std::string& session_key, const std::string& us
         }
     }
     
-    LOG_INFO("Agent response: ", response.substr(0, 100));
     return response;
 }
 
+// 运行 Agent（流式输出）
 void AgentLoop::run_stream(
     const std::string& session_key,
     const std::string& user_message,
     std::function<void(const std::string&)> on_chunk
 ) {
-    // 构建消息
     std::vector<Message> messages = build_messages(session_key, user_message);
     
-    // 添加用户消息到会话
     if (session_manager_) {
         Session* session = session_manager_->get_session(session_key);
         if (session) {
@@ -147,7 +143,6 @@ void AgentLoop::run_stream(
         }
     }
     
-    // 流式调用
     std::string full_response;
     
     auto result = model_client_->chat_stream(messages, 
@@ -162,7 +157,6 @@ void AgentLoop::run_stream(
         return;
     }
     
-    // 添加响应到会话
     if (session_manager_) {
         Session* session = session_manager_->get_session(session_key);
         if (session) {

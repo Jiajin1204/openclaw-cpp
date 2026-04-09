@@ -1,9 +1,8 @@
 #include "config.h"
 #include "logger.h"
 #include <fstream>
-#include <sstream>
 #include <algorithm>
-#include <cctype>
+#include <cstdlib>
 
 namespace openclaw {
 
@@ -19,25 +18,73 @@ bool ConfigManager::load(const std::string& path) {
         return false;
     }
     
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    std::string content = buffer.str();
-    
-    config_path_ = path;
-    return load_from_string(content);
+    try {
+        nlohmann::json j;
+        file >> j;
+        
+        config_path_ = path;
+        return parse_json(j);
+        
+    } catch (const nlohmann::json::parse_error& e) {
+        LOG_ERROR("Failed to parse config: ", e.what());
+        return false;
+    }
 }
 
 bool ConfigManager::load_from_string(const std::string& content) {
     try {
-        parse_json(content);
+        nlohmann::json j = nlohmann::json::parse(content);
+        return parse_json(j);
+    } catch (const nlohmann::json::parse_error& e) {
+        LOG_ERROR("Failed to parse config: ", e.what());
+        return false;
+    }
+}
+
+bool ConfigManager::parse_json(const nlohmann::json& j) {
+    try {
+        // gateway
+        if (j.contains("gateway")) {
+            const auto& gw = j["gateway"];
+            if (gw.contains("host")) config_.gateway.host = gw["host"].get<std::string>();
+            if (gw.contains("port")) config_.gateway.port = gw["port"].get<int>();
+            if (gw.contains("token")) config_.gateway.token = gw["token"].get<std::string>();
+        }
         
-        // 展开环境变量
-        config_.model.api_key = expand_env(config_.model.api_key);
+        // model
+        if (j.contains("model")) {
+            const auto& m = j["model"];
+            if (m.contains("provider")) config_.model.provider = m["provider"].get<std::string>();
+            if (m.contains("api_key")) {
+                config_.model.api_key = m["api_key"].get<std::string>();
+                config_.model.api_key = expand_env(config_.model.api_key);
+            }
+            if (m.contains("base_url")) config_.model.base_url = m["base_url"].get<std::string>();
+            if (m.contains("model")) config_.model.model = m["model"].get<std::string>();
+        }
+        
+        // workspace
+        if (j.contains("workspace")) {
+            const auto& w = j["workspace"];
+            if (w.contains("path")) {
+                config_.workspace.path = w["path"].get<std::string>();
+                config_.workspace.path = expand_env(config_.workspace.path);
+            }
+        }
+        
+        // session
+        if (j.contains("session")) {
+            const auto& s = j["session"];
+            if (s.contains("dm_scope")) config_.session.dm_scope = s["dm_scope"].get<std::string>();
+            if (s.contains("max_entries")) config_.session.max_entries = s["max_entries"].get<int>();
+            if (s.contains("prune_after_days")) config_.session.prune_after_days = s["prune_after_days"].get<int>();
+        }
         
         LOG_INFO("Config loaded successfully");
         return true;
-    } catch (const std::exception& e) {
-        LOG_ERROR("Failed to parse config: ", e.what());
+        
+    } catch (const nlohmann::json::exception& e) {
+        LOG_ERROR("Failed to parse config values: ", e.what());
         return false;
     }
 }
@@ -102,20 +149,20 @@ bool ConfigManager::save(const std::string& path) {
         return false;
     }
     
-    // 简单 JSON 输出
-    file << "{\n";
-    file << "  \"gateway\": {\n";
-    file << "    \"host\": \"" << config_.gateway.host << "\",\n";
-    file << "    \"port\": " << config_.gateway.port << ",\n";
-    file << "    \"token\": \"" << config_.gateway.token << "\"\n";
-    file << "  },\n";
-    file << "  \"model\": {\n";
-    file << "    \"provider\": \"" << config_.model.provider << "\",\n";
-    file << "    \"api_key\": \"" << config_.model.api_key << "\",\n";
-    file << "    \"base_url\": \"" << config_.model.base_url << "\",\n";
-    file << "    \"model\": \"" << config_.model.model << "\"\n";
-    file << "  }\n";
-    file << "}\n";
+    nlohmann::json j;
+    j["gateway"] = nlohmann::json::object({
+        {"host", config_.gateway.host},
+        {"port", config_.gateway.port},
+        {"token", config_.gateway.token}
+    });
+    j["model"] = nlohmann::json::object({
+        {"provider", config_.model.provider},
+        {"api_key", config_.model.api_key},
+        {"base_url", config_.model.base_url},
+        {"model", config_.model.model}
+    });
+    
+    file << j.dump(4);
     
     LOG_INFO("Config saved to: ", out_path);
     return true;
@@ -138,150 +185,13 @@ std::string ConfigManager::expand_env(const std::string& value) const {
         
         if (env_val) {
             result.replace(start, end - start + 1, env_val);
+        } else {
+            // 环境变量不存在，删除占位符
+            result.replace(start, end - start + 1, "");
         }
         
         start = end + 1;
     }
-    
-    return result;
-}
-
-// 简单 JSON 解析
-void ConfigManager::parse_json(const std::string& content) {
-    size_t pos = 0;
-    
-    // 跳过空白
-    while (pos < content.size() && std::isspace(content[pos])) pos++;
-    
-    if (pos >= content.size() || content[pos] != '{') {
-        throw std::runtime_error("Invalid JSON: expected {");
-    }
-    pos++;
-    
-    while (pos < content.size()) {
-        // 跳过空白
-        while (pos < content.size() && std::isspace(content[pos])) pos++;
-        
-        if (pos >= content.size()) break;
-        
-        if (content[pos] == '}') {
-            pos++;
-            break;
-        }
-        
-        if (content[pos] == ',') {
-            pos++;
-            continue;
-        }
-        
-        // 解析 key
-        std::string key = parse_string(content, pos);
-        
-        // 跳过空白和冒号
-        while (pos < content.size() && (std::isspace(content[pos]) || content[pos] == ':')) pos++;
-        
-        // 解析 value
-        Json value;
-        parse_value(content, pos, value);
-        
-        // 存储到配置
-        if (std::holds_alternative<std::string>(value)) {
-            std::string full_key = "model." + key;
-            set_string(full_key, std::get<std::string>(value));
-        } else if (std::holds_alternative<int64_t>(value)) {
-            std::string full_key = "model." + key;
-            set_int(full_key, static_cast<int>(std::get<int64_t>(value)));
-        }
-    }
-}
-
-void ConfigManager::parse_value(const std::string& json, size_t& pos, Json& result) {
-    while (pos < json.size() && std::isspace(json[pos])) pos++;
-    
-    if (pos >= json.size()) {
-        result = nullptr;
-        return;
-    }
-    
-    char c = json[pos];
-    
-    if (c == '"') {
-        result = parse_string(json, pos);
-    } else if (c == '{') {
-        // 对象 - 简化处理
-        pos++;
-        std::map<std::string, Json> obj;
-        while (pos < json.size() && json[pos] != '}') {
-            while (pos < json.size() && (std::isspace(json[pos]) || json[pos] == ',')) pos++;
-            if (json[pos] == '}') break;
-            std::string key = parse_string(json, pos);
-            while (pos < json.size() && (std::isspace(json[pos]) || json[pos] == ':')) pos++;
-            Json value;
-            parse_value(json, pos, value);
-            obj[key] = value;
-        }
-        if (pos < json.size() && json[pos] == '}') pos++;
-        result = obj;
-    } else if (c == '[') {
-        // 数组 - 简化处理
-        pos++;
-        std::vector<Json> arr;
-        while (pos < json.size() && json[pos] != ']') {
-            while (pos < json.size() && (std::isspace(json[pos]) || json[pos] == ',')) pos++;
-            if (json[pos] == ']') break;
-            Json value;
-            parse_value(json, pos, value);
-            arr.push_back(value);
-        }
-        if (pos < json.size() && json[pos] == ']') pos++;
-        result = arr;
-    } else if (c == 't' || c == 'f') {
-        // 布尔值
-        std::string val = json.substr(pos, c == 't' ? 4 : 5);
-        result = (val == "true");
-        pos += (c == 't' ? 4 : 5);
-    } else if (c == 'n') {
-        // null
-        result = nullptr;
-        pos += 4;
-    } else {
-        // 数字
-        size_t start = pos;
-        while (pos < json.size() && (std::isdigit(json[pos]) || json[pos] == '.' || json[pos] == '-')) pos++;
-        std::string num_str = json.substr(start, pos - start);
-        if (num_str.find('.') != std::string::npos) {
-            result = std::stod(num_str);
-        } else {
-            result = std::stoll(num_str);
-        }
-    }
-}
-
-std::string ConfigManager::parse_string(const std::string& json, size_t& pos) {
-    if (pos >= json.size() || json[pos] != '"') {
-        return "";
-    }
-    pos++; // 跳过开始的引号
-    
-    std::string result;
-    while (pos < json.size() && json[pos] != '"') {
-        if (json[pos] == '\\' && pos + 1 < json.size()) {
-            pos++;
-            switch (json[pos]) {
-                case 'n': result += '\n'; break;
-                case 't': result += '\t'; break;
-                case 'r': result += '\r'; break;
-                case '\\': result += '\\'; break;
-                case '"': result += '"'; break;
-                default: result += json[pos]; break;
-            }
-        } else {
-            result += json[pos];
-        }
-        pos++;
-    }
-    
-    if (pos < json.size() && json[pos] == '"') pos++; // 跳过结束的引号
     
     return result;
 }

@@ -1,0 +1,20 @@
+{
+  "model": {
+    "provider": "minimax-cn",
+    "api_key": "${OPENCLAW_CPP_API_KEY}",
+    "base_url": "https://api.minimaxi.com/v1/text/chatcompletion_v2",
+    "model": "MiniMax-M2.5"
+  },
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 18789,
+    "token": "test"
+  },
+  "workspace": {
+    "path": "${HOME}/.openclaw-cpp/workspace"
+  },
+  "session": {
+    "max_entries": 20,
+    "prune_after_days": 30
+  }
+}

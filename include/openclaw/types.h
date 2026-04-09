@@ -5,22 +5,44 @@
 #include <vector>
 #include <map>
 #include <memory>
-#include <variant>
 #include <optional>
+#include <nlohmann/json.hpp>
 
 namespace openclaw {
 
-// ============ 基础类型 ============
+// ============ JSON 类型 ============
+using Json = nlohmann::json;
 
-using Json = std::variant<
-    std::nullptr_t,
-    bool,
-    int64_t,
-    double,
-    std::string,
-    std::vector<Json>,
-    std::map<std::string, Json>
->;
+// ============ 配置结构体 ============
+struct GatewayConfig {
+    std::string host;
+    int port = 0;
+    std::string token;
+};
+
+struct ModelConfig {
+    std::string provider;
+    std::string api_key;
+    std::string base_url;
+    std::string model;
+};
+
+struct WorkspaceConfig {
+    std::string path;
+};
+
+struct SessionConfig {
+    std::string dm_scope;
+    int max_entries = 20;
+    int prune_after_days = 30;
+};
+
+struct Config {
+    GatewayConfig gateway;
+    ModelConfig model;
+    WorkspaceConfig workspace;
+    SessionConfig session;
+};
 
 // ============ 结果类型 ============
 
@@ -30,45 +52,19 @@ struct Result {
     T value;
     std::string error;
     
-    static Result<T> success(T val) {
-        return {true, std::move(val), ""};
+    static Result success(T val) {
+        return {true, val, ""};
     }
     
-    static Result<T> failure(std::string err) {
-        return {false, T{}, std::move(err)};
+    static Result failure(const std::string& err) {
+        return {false, T{}, err};
     }
-    
-    explicit operator bool() const { return ok; }
 };
 
-using ResultVoid = Result<std::monostate>;
+// ============ 可选类型 ============
 
-// ============ 配置结构 ============
-
-struct Config {
-    struct Gateway {
-        std::string host = "0.0.0.0";
-        int port = 18789;
-        std::string token = "";
-    } gateway;
-    
-    struct Model {
-        std::string provider = "openai";
-        std::string api_key = "";
-        std::string base_url = "https://api.openai.com/v1";
-        std::string model = "gpt-4o";
-    } model;
-    
-    struct Workspace {
-        std::string path = "~/.openclaw/workspace";
-    } workspace;
-    
-    struct Session {
-        std::string dm_scope = "main";
-        int max_entries = 500;
-        int prune_after_days = 30;
-    } session;
-};
+template<typename T>
+using Optional = std::optional<T>;
 
 } // namespace openclaw
 

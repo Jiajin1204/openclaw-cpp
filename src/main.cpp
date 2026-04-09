@@ -1,164 +1,172 @@
 /**
  * @file main.cpp
- * @brief 主程序入口 - REPL 客户端模式
+ * @brief OpenClaw C++ - Agent REPL
  */
 
 #include <iostream>
-#include <memory>
-#include <csignal>
-#include <thread>
-#include <vector>
 #include <string>
-#include <sstream>
-#include <iomanip>
+#include <csignal>
 #include <chrono>
 #include <ctime>
+#include <iomanip>
+#include <cstdlib>
+#include <unistd.h>
 
 #include "utils/logger.h"
 #include "utils/config.h"
-#include "session/session.h"
-#include "tools/tools.h"
-#include "agent/agent.h"
+#include "session/session_manager.h"
+#include "tools/tool_engine.h"
+#include "agent/model_client.h"
+#include "agent/agent_loop.h"
 
 using namespace openclaw;
 
-// 打印带颜色的 banner
+bool g_running = true;
+
 void print_banner() {
-    std::cout << "\033[36m" << R"(
+    std::cout << R"(
   ____            _        ____   ___  _
  / ___| _   _ ___| |_ ___|  _ \ / _ \| |
  \___ \| | | / __| __/ _ \ |_) | | | | |
   ___) | |_| \__ \ ||  __/  _ <| |_| | |___
  |____/ \__, |___/\__\___|_| \_\\___/|_____|
         |___/
-)" << "\033[0m";
-    std::cout << "\033[90m  OpenClaw C++ REPL Client\033[0m" << std::endl;
-    std::cout << "\033[90m  Type 'help' for available commands\033[0m" << std::endl;
+)";
+    std::cout << "  OpenClaw C++ v1.0 - Agent REPL\n";
+    std::cout << "  Type 'help' for commands\n\n";
 }
 
-// 打印帮助信息
 void print_help() {
     std::cout << R"(
-\033[36m📖 Available Commands:\033[0m
-
-  \033[33mhelp\033[0m              Show this help message
-  \033[33mclear\033[0m             Clear the screen
-  \033[33mtools\033[0m            List available tools
-  \033[33msession\033[0m           Show current session info
-  \033[33mquit/exit\033[0m        Exit the program
-
-  \033[33m<message>\033[0m        Send a message to the agent
-
-\033[36m🔧 Tool Examples:\033[0m
-
-  \033[90m  read "/path/to/file"\033[0m
-  \033[90m  write "/path/to/file|content"\033[0m
-  \033[90m  exec "ls -la"\033[0m
-  \033[90m  memory_search "keyword"\033[0m
-  \033[90m  memory_get "2026-03-19"\033[0m
-)" << std::endl;
+Commands:
+  help       - Show this help
+  quit       - Exit
+  clear      - Clear screen
+  tools      - List available tools
+)";
 }
 
-// 打印可用工具列表
-void print_tools(ToolEngine& engine) {
-    auto tools = engine.list_tools();
-    std::cout << "\n\033[36m🔧 Available Tools (\033[0m" << tools.size() << "\033[36m):\033[0m\n" << std::endl;
-
-    for (const auto& tool : tools) {
-        std::cout << "  \033[33m" << tool.name << "\033[0m" << std::endl;
-        std::cout << "    \033[90m" << tool.description << "\033[0m" << std::endl;
-    }
-    std::cout << std::endl;
-}
-
-// 打印会话信息
-void print_session_info(Session* session) {
-    if (!session) {
-        std::cout << "\033[31mNo active session\033[0m" << std::endl;
-        return;
-    }
-
-    auto history = session->get_history(5);
-    std::cout << "\n\033[36m📋 Session Info:\033[0m" << std::endl;
-    std::cout << "  \033[33mKey:\033[0m " << session->key() << std::endl;
-    std::cout << "  \033[33mMessages:\033[0m " << history.size() << std::endl;
-
-    // 打印最后几条消息
-    if (!history.empty()) {
-        std::cout << "\n\033[90m  Recent messages:\033[0m" << std::endl;
-        for (const auto& msg : history) {
-            std::string role_str;
-            switch (msg.role) {
-                case MessageRole::User: role_str = "👤 User"; break;
-                case MessageRole::Assistant: role_str = "🤖 Assistant"; break;
-                case MessageRole::System: role_str = "⚙️ System"; break;
-                case MessageRole::Tool: role_str = "🔧 Tool"; break;
-                case MessageRole::ToolResult: role_str = "📤 Tool Result"; break;
-                default: role_str = "❓"; break;
-            }
-            std::string preview = msg.content.length() > 50 ?
-                msg.content.substr(0, 50) + "..." : msg.content;
-            std::cout << "    " << role_str << ": " << preview << std::endl;
-        }
-    }
-    std::cout << std::endl;
-}
-
-// 打印带时间戳的提示符
 void print_prompt() {
     auto now = std::chrono::system_clock::now();
     std::time_t now_time = std::chrono::system_clock::to_time_t(now);
     std::tm* tm_now = std::localtime(&now_time);
-
-    std::cout << "\033[32m┌─[\033[0m";
-    std::cout << "\033[36m" << std::put_time(tm_now, "%H:%M:%S") << "\033[0m";
-    std::cout << "\033[32m]\033[0m ";
-    std::cout << "\033[33m>\033[0m ";
+    std::cout << "\033[32m[\033[0m" << std::put_time(tm_now, "%H:%M:%S") << "\033[32m]\033[0m \033[33m>\033[0m ";
 }
 
-// 打印分隔线
-void print_separator() {
-    std::cout << "\033[90m────────────────────────────────────────\033[0m" << std::endl;
+// 获取可执行文件所在目录
+std::string get_exe_dir() {
+    char buf[1024];
+    ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (len != -1) {
+        buf[len] = '\0';
+        std::string path(buf);
+        size_t pos = path.find_last_of('/');
+        if (pos != std::string::npos) {
+            return path.substr(0, pos);
+        }
+    }
+    return ".";
 }
 
-void run_cli_mode(ToolEngine* tool_engine) {
+// 验证模型是否可用 - 实际调用模型测试
+bool verify_model() {
+    const auto& config = ConfigManager::instance().get();
+    
+    // 检查 API Key
+    if (config.model.api_key.empty()) {
+        std::cerr << "\n[ERROR] API Key is empty or not set!\n";
+        std::cerr << "Please set environment variable OPENCLAW_CPP_API_KEY\n";
+        std::cerr << "Example: export OPENCLAW_CPP_API_KEY=\"your-key-here\"\n";
+        return false;
+    }
+    
+    // 检查 base_url
+    if (config.model.base_url.empty()) {
+        std::cerr << "\n[ERROR] Model base_url is not configured!\n";
+        return false;
+    }
+    
+    // 检查 model
+    if (config.model.model.empty()) {
+        std::cerr << "\n[ERROR] Model name is not configured!\n";
+        return false;
+    }
+    
+    // 实际调用模型验证
+    std::cout << "[INFO] Testing model connection...\n";
+    
+    try {
+        ModelClient test_client;
+        std::vector<Message> test_msgs;
+        test_msgs.push_back(Message(MessageRole::User, "hi"));
+        
+        auto result = test_client.chat(test_msgs);
+        
+        if (!result.ok) {
+            std::cerr << "\n[ERROR] Model call failed: " << result.error << "\n";
+            return false;
+        }
+        
+        // 检查返回内容是否有错误标记
+        if (result.value.content.find("Error:") == 0 || 
+            result.value.content.find("API Error:") == 0) {
+            std::cerr << "\n[ERROR] Model returned error: " << result.value.content << "\n";
+            return false;
+        }
+        
+        std::cout << "[INFO] Model connection OK!\n";
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "\n[ERROR] Model exception: " << e.what() << "\n";
+        return false;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    (void)argc; (void)argv;
+    
+    std::signal(SIGINT, [](int){ g_running = false; });
+    
     print_banner();
-    print_separator();
     
-    std::string session_key = "agent:main:main";
-    Session* session = SessionManager::instance().get_session(session_key);
+    // 获取可执行文件目录，查找 config.json
+    std::string exe_dir = get_exe_dir();
+    std::string config_path = exe_dir + "/config.json";
     
-    // 创建真正的 Agent
+    // 也检查当前目录
+    if (access(config_path.c_str(), F_OK) != 0) {
+        config_path = "./config.json";
+    }
+    
+    // 加载配置
+    if (!ConfigManager::instance().load(config_path)) {
+        std::cerr << "Failed to load config from: " << config_path << "\n";
+        return 1;
+    }
+    
+    // 验证模型配置
+    if (!verify_model()) {
+        return 1;
+    }
+    
+    // 初始化组件
+    SessionManager session_manager;
+    ToolEngine tool_engine;
     ModelClient model_client;
-    AgentLoop agent(&model_client, tool_engine);
+    AgentLoop agent_loop(&session_manager, &tool_engine);
     
-    // 设置系统提示词
-    agent.set_system_prompt(R"(You are OpenClaw C++, a helpful AI assistant.
-
-You have access to the following tools:
-- exec: Execute shell commands
-- read: Read file contents  
-- write: Write content to files
-- memory_search: Search memory files
-- memory_get: Get memory file by date
-
-Use these tools to help the user. Always execute tools when the user asks for file operations or shell commands.)");
+    agent_loop.set_system_prompt("You are OpenClaw C++, a helpful AI assistant. You have access to tools: exec (run shell commands), read (read files), write (write files). When user asks to run commands or access files, use the appropriate tool.");
     
-    while (true) {
+    std::string session_key = "main";
+    
+    while (g_running) {
         print_prompt();
         
         std::string input;
         if (!std::getline(std::cin, input)) break;
         
-        // 去除前后空白
-        size_t start = input.find_first_not_of(" \t");
-        if (start == std::string::npos) continue;
-        size_t end = input.find_last_not_of(" \t");
-        input = input.substr(start, end - start + 1);
-
-        // 处理命令
         if (input == "quit" || input == "exit") {
-            std::cout << "\n\033[90m👋 Goodbye!\033[0m" << std::endl;
+            std::cout << "Bye!\n";
             break;
         }
         
@@ -170,88 +178,29 @@ Use these tools to help the user. Always execute tools when the user asks for fi
         if (input == "clear") {
             std::cout << "\033[2J\033[H";
             print_banner();
-            print_separator();
             continue;
         }
         
         if (input == "tools") {
-            print_tools(*tool_engine);
+            auto tools = tool_engine.list_tools();
+            std::cout << "\nAvailable tools (" << tools.size() << "):\n";
+            for (const auto& t : tools) {
+                std::cout << "  - " << t.name << ": " << t.description << "\n";
+            }
             continue;
         }
         
-        if (input == "session") {
-            print_session_info(session);
-            continue;
-        }
-        
-        // 空消息跳过
         if (input.empty()) continue;
         
-        // 尝试直接调用工具 (以 / 开头)
-        if (input[0] == '/') {
-            std::string rest = input.substr(1);
-            size_t space_pos = rest.find(' ');
-            
-            std::string tool_name, tool_params;
-            if (space_pos != std::string::npos) {
-                tool_name = rest.substr(0, space_pos);
-                tool_params = rest.substr(space_pos + 1);
-            } else {
-                tool_name = rest;
-                tool_params = "";
-            }
-            
-            if (tool_engine->has_tool(tool_name)) {
-                print_separator();
-                std::cout << "\033[36m🔧 Executing: \033[0m" << tool_name 
-                          << " \033[90m(\033[0m" << tool_params << "\033[90m)\033[0m" << std::endl;
-                std::string result = tool_engine->execute(tool_name, tool_params);
-                std::cout << "\n\033[36m📤 Result:\033[0m" << std::endl;
-                std::cout << "\033[37m" << result << "\033[0m" << std::endl;
-                print_separator();
-                continue;
-            } else {
-                std::cout << "\033[31m❌ Unknown tool: \033[0m" << tool_name << std::endl;
-                continue;
-            }
-        }
-        
-        // 使用真正的 Agent 处理
-        print_separator();
-        std::cout << "\033[36m📝 You said:\033[0m " << input << std::endl;
-        std::cout << "\n\033[36m💬 Assistant:\033[0m" << std::endl;
-        
-        std::string response = agent.run(session_key, input);
-        std::cout << "\033[37m" << response << "\033[0m" << std::endl;
-        print_separator();
+        // 运行 Agent（流式输出）
+        std::cout << "\n🤖 ";
+        std::string response;
+        agent_loop.run_stream(session_key, input, [&response](const std::string& chunk) {
+            std::cout << chunk << std::flush;
+            response += chunk;
+        });
+        std::cout << "\n\n";
     }
-}
-
-int main(int argc, char* argv[]) {
-    (void)argc; (void)argv;
-
-    // 加载配置 - 优先级: 环境变量 > .env 文件 > 默认配置
-    // 尝试多个可能的 .env 路径
-    const char* env_config_path = std::getenv("OPENCLAW_CONFIG");
-    if (env_config_path) {
-        ConfigManager::instance().load(env_config_path);
-    } else {
-        // 尝试常见位置
-        ConfigManager::instance().load(".env");
-        ConfigManager::instance().load("../.env");
-        ConfigManager::instance().load("../../.env");
-    }
-    // 环境变量会在 ModelClient 构造时自动覆盖（见 agent.cpp）
-
-    // 信号处理
-    std::signal(SIGINT, [](int){ exit(0); });
-    std::signal(SIGTERM, [](int){ exit(0); });
-
-    // 初始化组件
-    ToolEngine tool_engine;
-
-    // 运行 CLI 模式
-    run_cli_mode(&tool_engine);
-
+    
     return 0;
 }

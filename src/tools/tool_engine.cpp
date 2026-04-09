@@ -1,5 +1,6 @@
 #include "tool_engine.h"
 #include "../utils/logger.h"
+#include <nlohmann/json.hpp>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -24,17 +25,17 @@ ToolEngine::~ToolEngine() {
 void ToolEngine::register_builtin_tools() {
     // exec - 执行命令
     register_tool("exec", "Execute a shell command", [](const std::string& params) -> Result<std::string> {
-        return exec_tool(params);
+        return ToolEngine::exec_tool(params);
     });
     
     // read - 读文件
     register_tool("read", "Read a file", [](const std::string& params) -> Result<std::string> {
-        return read_tool(params);
+        return ToolEngine::read_tool(params);
     });
     
     // write - 写文件
     register_tool("write", "Write to a file", [](const std::string& params) -> Result<std::string> {
-        return write_tool(params);
+        return ToolEngine::write_tool(params);
     });
     
     LOG_INFO("Registered ", tools_.size(), " builtin tools");
@@ -84,15 +85,43 @@ bool ToolEngine::has_tool(const std::string& name) const {
 // ============ 内置工具实现 ============
 
 Result<std::string> ToolEngine::exec_tool(const std::string& params) {
-    // 简化：直接执行命令
-    // 实际实现应该解析 JSON 参数
+    // 解析 JSON 参数
+    std::string command;
     
-    std::string command = params;
+    try {
+        auto j = nlohmann::json::parse(params);
+        
+        // 尝试多个可能的字段名
+        if (j.contains("command") && j["command"].is_string()) {
+            command = j["command"];
+        } else if (j.contains("cmd") && j["cmd"].is_string()) {
+            command = j["cmd"];
+        } else if (j.contains("shell") && j["shell"].is_string()) {
+            command = j["shell"];
+        } else {
+            // 遍历所有 string 值
+            for (auto& [key, val] : j.items()) {
+                if (val.is_string()) {
+                    command = val;
+                    break;
+                }
+            }
+        }
+        
+        if (command.empty()) {
+            command = params;  // 回退到原始字符串
+        }
+    } catch (...) {
+        // 解析失败，当作普通命令
+        command = params;
+    }
     
-    // 移除引号
-    if (command.size() >= 2 && 
-        command.front() == '"' && command.back() == '"') {
-        command = command.substr(1, command.size() - 2);
+    // 移除首尾空白和引号
+    while (!command.empty() && (command.front() == ' ' || command.front() == '"' || command.front() == '\'')) {
+        command = command.substr(1);
+    }
+    while (!command.empty() && (command.back() == ' ' || command.back() == '"' || command.back() == '\'')) {
+        command.pop_back();
     }
     
     LOG_INFO("Executing command: ", command);
@@ -124,12 +153,31 @@ Result<std::string> ToolEngine::exec_tool(const std::string& params) {
 }
 
 Result<std::string> ToolEngine::read_tool(const std::string& params) {
-    std::string filepath = params;
+    // 解析 JSON 参数
+    std::string filepath;
     
-    // 移除引号
-    if (filepath.size() >= 2 && 
-        filepath.front() == '"' && filepath.back() == '"') {
-        filepath = filepath.substr(1, filepath.size() - 2);
+    try {
+        auto j = nlohmann::json::parse(params);
+        
+        if (j.contains("path") && j["path"].is_string()) {
+            filepath = j["path"];
+        } else if (j.contains("file") && j["file"].is_string()) {
+            filepath = j["file"];
+        } else if (j.contains("filename") && j["filename"].is_string()) {
+            filepath = j["filename"];
+        } else {
+            filepath = params;  // 回退
+        }
+    } catch (...) {
+        filepath = params;
+    }
+    
+    // 移除首尾空白和引号
+    while (!filepath.empty() && (filepath.front() == ' ' || filepath.front() == '"' || filepath.front() == '\'')) {
+        filepath = filepath.substr(1);
+    }
+    while (!filepath.empty() && (filepath.back() == ' ' || filepath.back() == '"' || filepath.back() == '\'')) {
+        filepath.pop_back();
     }
     
     // 安全检查：防止路径遍历

@@ -3,7 +3,7 @@
 
 #include <string>
 #include <memory>
-#include "types.h"
+#include "openclaw/types.h"
 
 namespace openclaw {
 
@@ -47,10 +47,8 @@ private:
     Config config_;
     std::string config_path_;
     
-    // 简单 JSON 解析
-    void parse_json(const std::string& content);
-    void parse_value(const std::string& json, size_t& pos, Json& result);
-    std::string parse_string(const std::string& json, size_t& pos);
+    // 使用 nlohmann/json 解析
+    bool parse_json(const nlohmann::json& j);
 };
 
 } // namespace openclaw
